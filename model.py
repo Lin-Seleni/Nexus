@@ -1,91 +1,65 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import tkinter as tk
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
-nb_layers = 10
-nb_neurons = 10
 
 # Define circular model with blocks (each block = Linear + ReLU)
-class CircularNN(nn.Module):
-    def __init__(self):
+class Nexus(nn.Module):
+    def __init__(self, nb_layers, nb_neurons, memory_size):
         super().__init__()
-        # Create nb_layers blocks, each consisting of a Linear and a ReLU
+        self.states = (2 * torch.rand(nb_neurons, nb_layers)) - 1
+        self.MindState = (2 * torch.rand(nb_layers, nb_neurons)) - 1
+        self.PastSelf = torch.stack([self.states.clone() for _ in range(memory_size)])
+        
         self.layers = nn.ModuleList([
-            layer for i in range(nb_layers) for layer in (nn.Linear(nb_neurons, nb_neurons), nn.ReLU())
+            nn.Sequential(
+                nn.Linear(nb_neurons, nb_neurons),
+                nn.LeakyReLU()
+            ) for _ in range(nb_layers)
         ])
-
-    def forward_block(self, x, block_index):
-        # Each block is two layers: a Linear layer then a ReLU activation.
-        linear = self.layers[2 * block_index]
-        relu = self.layers[2 * block_index + 1]
-        out = relu(linear(x))
-        return out
-
-# Create model, optimizer, and initialize signals for all blocks
-def reset_model():
-    global model, optimizer, signals
-    model = CircularNN()
-    optimizer = optim.Adam(model.parameters(), lr=0.01)
-    # Initialize each block's signal with a random vector.
-    signals = [torch.randn(nb_neurons) for _ in range(nb_layers)]
-
-reset_model()
-
-# Tkinter UI Setup
-root = tk.Tk()
-root.title("Circular NN Controller")
-
-frame = tk.Frame(root)
-frame.pack()
-
-# Heatmap Setup
-fig, ax = plt.subplots()
-
-def get_signals_array():
-    # Convert each torch tensor to numpy array for display
-    return np.stack([s.detach().numpy() for s in signals], axis=0)
-
-heatmap = ax.imshow(get_signals_array(), cmap='viridis', vmin=0, vmax=1)
-plt.colorbar(heatmap)
-ax.set_title("Neuron Activations Heatmap")
-ax.set_xticks([])
-ax.set_yticks(range(nb_layers))
-ax.set_yticklabels([f"Layer {i+1}" for i in range(nb_layers)])
-
-canvas = FigureCanvasTkAgg(fig, master=root)
-canvas.get_tk_widget().pack()
-
-# Update heatmap with current signals
-def update_plot():
-    data = get_signals_array()
-    heatmap.set_array(data)
-    canvas.draw()
-
-# On each step, update every block concurrently.
-# For block i, use the previous block's signal (with circular wrap-around)
-def step_forward():
-    global signals
-    new_signals = []
-    for i in range(nb_layers):
-        # For i=0, signals[-1] (last block) serves as input, achieving a circular connection.
-        prev_signal = signals[i-1]
-        new_signal = model.forward_block(prev_signal, i)
-        new_signals.append(new_signal)
-    signals = new_signals
-    update_plot()
-
-def reset():
-    reset_model()
-    update_plot()
-
-# Buttons: one click now performs a full block update (both linear and relu).
-tk.Button(frame, text="Step Forward", command=step_forward).pack(side=tk.LEFT)
-tk.Button(frame, text="Reset", command=reset).pack(side=tk.LEFT)
-tk.Button(frame, text="Quit", command=root.destroy).pack(side=tk.LEFT)
-
-update_plot()
-root.mainloop()
+        
+        # Convolution to update MindState:
+        # We'll use a Conv1d layer with kernel_size = memory_size (which will collapse that dimension)
+        self.mind_conv = nn.Conv1d(
+            in_channels=nb_layers,      # Treating nb_layers as channels
+            out_channels=nb_layers,     # Keeping the same number of channels
+            kernel_size=memory_size     # Kernel size equals memory_size to collapse it
+        )
+    
+    def current_state(self):
+        return self.states
+        
+    def update_mindstate(self):
+        # Reshape PastSelf:
+        # Original PastSelf shape: (memory_size, nb_neurons, nb_layers)
+        # Permute to: (nb_neurons, nb_layers, memory_size)
+        past_input = self.PastSelf.permute(1, 2, 0)
+        
+        # Apply the convolution. Expected output shape: (nb_neurons, nb_layers, 1)
+        conv_output = self.mind_conv(past_input)
+        
+        # Apply activation (optional, here using Tanh)
+        conv_output = torch.tanh(conv_output)
+        
+        # Remove the last dimension (sequence length) to get shape: (nb_neurons, nb_layers)
+        conv_output = conv_output.squeeze(2)
+        
+        # Transpose to obtain MindState shape: (nb_layers, nb_neurons)
+        self.MindState = conv_output.transpose(0, 1)
+    
+    def step(self):
+        # Process each layer: new_states will have shape (nb_layers, nb_neurons)
+        new_states = torch.stack([self.layers[idx](self.states[idx - 1]) for idx in range(len(self.layers))])
+        self.states = torch.mm(new_states, self.MindState)
+        self.states = torch.tanh(self.states)
+        
+        # Update PastSelf: remove the oldest state and append the new one
+        self.PastSelf = torch.cat([self.PastSelf[1:], self.states.unsqueeze(0)], dim=0)
+        
+        # Dynamically update MindState using the convolutional network
+        self.update_mindstate()
+        
+        print("\n----- State -----\n\n", self.states)
+        print("\n----- MindState -----\n\n", self.MindState)
+        print("\n----- PastSelf -----\n\n", self.PastSelf)
+        
+        return self.states
