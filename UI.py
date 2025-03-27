@@ -1,116 +1,167 @@
 import tkinter as tk
 from model import Nexus
+from torch import mm
 import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.gridspec import GridSpec
 
-nb_layers = 5
-nb_neurons = 5
+# Global config
+nb_layers = 6
+nb_neurons = 10
 memory_size = 5
 
-# Create model, optimizer, and initialize signals for all blocks
-def reset_model():
-    global model, optimizer, signal
-    model = Nexus(nb_layers, nb_neurons, memory_size)
-    optimizer = optim.Adam(model.parameters(), lr=0.01)
-    signal = model.current_state().detach().numpy()
-    update_plot()
+# Track the initial core and how many steps have been taken
+initial_core = None
+step_count = 0
 
-def get_signals_array():
-    return model.current_state().detach().numpy()
+# -------------------------
+# Data access functions
+# -------------------------
+def get_core_array():
+    # core shape: (nb_layers, nb_neurons)
+    return model.core.detach().numpy()
 
-def get_mindstate_array():
-    # MindState is of shape (nb_layers, nb_neurons)
-    return model.MindState.detach().numpy()
+def get_stabilizer_array():
+    # stabilizer shape: (nb_neurons, nb_layers)
+    return model.stabilizer.detach().numpy()
 
-def get_pastself_array():
-    # PastSelf is of shape (memory_size, nb_neurons, nb_layers)
-    # For visualization, stack along the vertical axis:
-    past = model.PastSelf.detach().numpy()  # shape: (memory_size, nb_neurons, nb_layers)
-    past_reshaped = past.reshape(memory_size * nb_neurons, nb_layers)
-    return past_reshaped
+def get_thought_array():
+    # thought shape: (nb_neurons, nb_neurons)
+    return model.thought.detach().numpy()
 
+def get_refiner_array():
+    # refiner shape: (nb_neurons, nb_layers)
+    return model.refiner.detach().numpy()
+
+def get_newcore_array():
+    """
+    The 'new core' is the product thought * refiner
+    *before* the transpose (as in model.step).
+    If no step has been taken yet, just return the initial core
+    transposed to match the shape (nb_neurons, nb_layers).
+    """
+    if step_count == 0:
+        return initial_core.numpy().T  # (nb_layers, nb_neurons) -> (nb_neurons, nb_layers)
+    else:
+        new_core = mm(model.thought, model.refiner)  # shape: (nb_neurons, nb_layers)
+        return new_core.detach().numpy()
+
+# -------------------------
+# Plot update function
+# -------------------------
 def update_plot():
-    # Update PastSelf heatmap (no annotations)
-    past_data = get_pastself_array()
-    heatmap_past.set_array(past_data)
+    # Retrieve the data arrays
+    core_data = get_core_array()          # (nb_layers, nb_neurons)
+    stabilizer_data = get_stabilizer_array()  # (nb_neurons, nb_layers)
+    thought_data = get_thought_array()    # (nb_neurons, nb_neurons)
+    refiner_data = get_refiner_array()    # (nb_neurons, nb_layers)
+    newcore_data = get_newcore_array()    # (nb_neurons, nb_layers)
     
-    # Update MindState heatmap and its annotations
-    mind_data = get_mindstate_array()
-    heatmap_mind.set_array(mind_data)
-    for txt in ax_mind.texts:
-        txt.remove()
-    for i in range(nb_layers):
-        for j in range(nb_neurons):
-            val = mind_data[i, j]
-            ax_mind.text(j, i, f"{val:.2f}", ha='center', va='center',
-                         color='white' if val < 0.5 else 'black')
+    # Update each heatmap
+    heatmap_core.set_data(core_data)
+    heatmap_refiner.set_data(refiner_data)
+    heatmap_stabilizer.set_data(stabilizer_data)
+    heatmap_thought.set_data(thought_data)
+    heatmap_newcore.set_data(newcore_data)
     
-    # Update states heatmap and its annotations
-    data = get_signals_array()
-    heatmap_states.set_array(data)
-    for txt in ax_states.texts:
-        txt.remove()
-    for i in range(nb_neurons):
-        for j in range(nb_layers):
-            val = data[i, j]
-            ax_states.text(j, i, f"{val:.2f}", ha='center', va='center', 
-                           color='white' if val < 0.5 else 'black')
+    # Clear old annotations and add new ones
+    for ax, data, fmt in [
+        (ax_core,       core_data,       "{:.2f}"),
+        (ax_refiner,    refiner_data,    "{:.2f}"),
+        (ax_stabilizer, stabilizer_data, "{:.2f}"),
+        (ax_thought,    thought_data,    "{:.2f}"),
+        (ax_newcore,    newcore_data,    "{:.2f}")
+    ]:
+        # remove any existing text objects
+        for txt in ax.texts:
+            txt.remove()
+        # create new text annotations
+        rows, cols = data.shape
+        for i in range(rows):
+            for j in range(cols):
+                val = data[i, j]
+                ax.text(j, i, fmt.format(val),
+                        ha='center', va='center',
+                        fontsize=8,
+                        color='white' if abs(val) < 0.5 else 'black')
     
-    canvas.draw()
+    # Use constrained_layout to keep everything lined up
+    fig.canvas.draw_idle()
 
 def step_forward():
-    global signal
-    signal = model.step().detach().numpy()
+    global step_count
+    step_count += 1
+    model.step()  # updates core, thought, etc.
     update_plot()
 
-# Tkinter UI Setup
+def reset_model():
+    global model, optimizer, initial_core, step_count
+    model = Nexus(nb_layers, nb_neurons, memory_size)
+    optimizer = optim.Adam(model.parameters(), lr=0.01)
+    step_count = 0
+    
+    # Store initial core so the 'New Core' subplot can show it (transposed) before any step
+    initial_core = model.current_state().detach().clone()
+    update_plot()
+
+# -------------------------
+# Tkinter + Matplotlib Setup
+# -------------------------
 root = tk.Tk()
-root.title("Nexus Network")
+root.title("Nexus Network Multiplication View")
 
 frame = tk.Frame(root)
 frame.pack()
 
-# Create a figure with three subplots arranged in one row:
-# PastSelf (left), MindState (middle), and states (right)
-fig, (ax_past, ax_mind, ax_states) = plt.subplots(1, 3, figsize=(12, 4))
+# Create figure with a 2 x 3 GridSpec
+# We'll place subplots like so:
+#
+#   Row0, Col0: (empty)        Row0, Col1: Core       Row0, Col2: Refiner
+#   Row1, Col0: Stabilizer     Row1, Col1: Thought    Row1, Col2: New Core
+#
+fig = plt.figure(figsize=(10, 6), constrained_layout=True)
+gs = GridSpec(2, 3, figure=fig)
 
-# PastSelf heatmap setup (left)
-past_data = np.zeros((memory_size * nb_neurons, nb_layers))
-heatmap_past = ax_past.imshow(past_data, cmap='viridis', vmin=-1, vmax=1)
-ax_past.set_title("PastSelf (stacked)")
-ax_past.set_xticks(range(nb_layers))
-# For y-axis, label memory slices if desired:
-y_ticks = [i * nb_neurons + nb_neurons // 2 for i in range(memory_size)]
-ax_past.set_yticks(y_ticks)
-ax_past.set_yticklabels([f"Memory {i+1}" for i in range(memory_size)])
-# Remove colorbar for PastSelf
+ax_core = fig.add_subplot(gs[0, 1])
+ax_core.set_title("Core")
+heatmap_core = ax_core.imshow(np.zeros((nb_layers, nb_neurons)), cmap='viridis', vmin=-1, vmax=1)
+ax_core.set_aspect("equal", adjustable="box")
+ax_core.set_anchor('SW')  # Align core at the bottom left of its Axes
 
-# MindState heatmap setup (middle)
-mind_data = np.zeros((nb_layers, nb_neurons))
-heatmap_mind = ax_mind.imshow(mind_data, cmap='viridis', vmin=-1, vmax=1)
-ax_mind.set_title("MindState")
-# Remove colorbar for MindState
+ax_refiner = fig.add_subplot(gs[0, 2])
+ax_refiner.set_title("Refiner")
+heatmap_refiner = ax_refiner.imshow(np.zeros((nb_neurons, nb_layers)), cmap='viridis', vmin=-1, vmax=1)
+ax_refiner.set_aspect("equal", adjustable="box")
 
-# States heatmap setup (right)
-state_data = np.zeros((nb_neurons, nb_layers))
-heatmap_states = ax_states.imshow(state_data, cmap='viridis', vmin=-1, vmax=1)
-ax_states.set_title("Current States")
-ax_states.set_xticks(range(nb_layers))
-ax_states.set_yticks(range(nb_neurons))
-ax_states.set_yticklabels([f"Layer {i+1}" for i in range(nb_neurons)])
-plt.colorbar(heatmap_states, ax=ax_states)
+ax_stabilizer = fig.add_subplot(gs[1, 0])
+ax_stabilizer.set_title("Stabilizer")
+heatmap_stabilizer = ax_stabilizer.imshow(np.zeros((nb_neurons, nb_layers)), cmap='viridis', vmin=-1, vmax=1)
+ax_stabilizer.set_aspect("equal", adjustable="box")
+
+ax_thought = fig.add_subplot(gs[1, 1])
+ax_thought.set_title("Thought")
+heatmap_thought = ax_thought.imshow(np.zeros((nb_neurons, nb_neurons)), cmap='viridis', vmin=-1, vmax=1)
+ax_thought.set_aspect("equal", adjustable="box")
+
+ax_newcore = fig.add_subplot(gs[1, 2])
+ax_newcore.set_title("New Core (pre-transpose)")
+heatmap_newcore = ax_newcore.imshow(np.zeros((nb_neurons, nb_layers)), cmap='viridis', vmin=-1, vmax=1)
+ax_newcore.set_aspect("equal", adjustable="box")
 
 canvas = FigureCanvasTkAgg(fig, master=root)
 canvas.get_tk_widget().pack()
 
 # Buttons
-tk.Button(frame, text="Step Forward", command=step_forward).pack(side=tk.LEFT)
-tk.Button(frame, text="Reset", command=reset_model).pack(side=tk.LEFT)
-tk.Button(frame, text="Quit", command=root.destroy).pack(side=tk.LEFT)
+btn_frame = tk.Frame(root)
+btn_frame.pack(pady=5)
 
-# Initialize model after UI setup
+tk.Button(btn_frame, text="Step Forward", command=step_forward).pack(side=tk.LEFT, padx=5)
+tk.Button(btn_frame, text="Reset", command=reset_model).pack(side=tk.LEFT, padx=5)
+tk.Button(btn_frame, text="Quit", command=root.destroy).pack(side=tk.LEFT, padx=5)
+
+# Initialize everything
 reset_model()
 
 root.mainloop()
